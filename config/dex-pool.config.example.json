@@ -1,0 +1,10 @@
+{
+  "chain": "base",
+  "rpc": "env:BASE_RPC_URL",
+  "pair": "WETH/USDC",
+  "fee": 500,
+  "from": "2024-01-01",
+  "to": "2024-01-02",
+  "timeframes": ["1m", "5m", "15m", "1h", "4h"],
+  "out": "./data/dex-pool-datasets"
+}

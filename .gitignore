@@ -1,0 +1,8 @@
+node_modules/
+dist/
+data/
+.data/
+
+dex-pool.config.json
+.env
+mydatabase.db

@@ -1,0 +1,42 @@
+{
+  "datasetId": "base-uniswap-v3-weth-usdc-v1",
+  "registry": {
+    "path": "config/dex-pools.base.example.json"
+  },
+  "network": {
+    "chain": "base",
+    "chainId": 8453,
+    "rpcUrlEnv": "BASE_RPC_URL",
+    "finality": {
+      "mode": "confirmation_lag",
+      "confirmations": 64
+    }
+  },
+  "build": {
+    "pools": ["base-uniswapv3-weth-usdc-500"],
+    "fromBlock": "12345678",
+    "toBlock": "12400000",
+    "baseTimeframe": "1m",
+    "timeframes": ["1m", "5m", "15m", "1h"],
+    "chunkSize": "5000",
+    "failFast": true
+  },
+  "output": {
+    "type": "local",
+    "uri": "local://./data/dex-pool-datasets"
+  },
+  "profiles": {
+    "local": {
+      "output": {
+        "type": "local",
+        "uri": "local://./data/dex-pool-datasets"
+      }
+    },
+    "prod": {
+      "output": {
+        "type": "s3",
+        "uri": "s3://my-datasets-bucket/trader-agent/dex-pool/base"
+      }
+    }
+  }
+}

@@ -1,0 +1,23 @@
+[
+  {
+    "id": "base-uniswap-v3-weth-usdc-005",
+    "chain": "base",
+    "dex": "uniswap_v3",
+    "kind": "UNISWAP_V3_STYLE",
+    "poolAddress": "0x0000000000000000000000000000000000000001",
+    "token0": {
+      "symbol": "WETH",
+      "address": "0x0000000000000000000000000000000000000002",
+      "decimals": 18
+    },
+    "token1": {
+      "symbol": "USDC",
+      "address": "0x0000000000000000000000000000000000000003",
+      "decimals": 6
+    },
+    "baseToken": "token0",
+    "quoteToken": "token1",
+    "feeTier": 500,
+    "startBlock": "12300000"
+  }
+]

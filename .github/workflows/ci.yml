@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: CLI help smoke tests
+        run: |
+          node dist/cli/index.js --help
+          node dist/cli/index.js build --help
+          node dist/cli/index.js run --help
+          node dist/cli/index.js discover --help
+          node dist/cli/index.js discover-cache --help
+          node dist/cli/index.js inspect --help
+          node dist/cli/index.js doctor --help
+          node dist/cli/index.js plan --help
+          node dist/cli/index.js validate --help
+
+      - name: Test
+        run: npm test
