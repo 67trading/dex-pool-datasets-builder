@@ -131,12 +131,12 @@ export async function exportDexWalkForwardDatasetToStorage(
     checksum,
     sourceDetails: {
       provider: "dex_pool",
-      endpoint: "eth_getLogs",
+      endpoint: truthManifest.source.eventSource,
       timezone: "UTC",
     },
     sourceDataset: {
       datasetId: truthManifest.datasetId,
-      sourceMode: "ONCHAIN_POOL_EVENTS",
+      sourceMode: truthManifest.sourceMode,
       chain: truthManifest.chain,
       dex: truthManifest.dex,
       poolAddress: truthManifest.poolAddress,
@@ -147,6 +147,10 @@ export async function exportDexWalkForwardDatasetToStorage(
       availableFromPolicy: "CANDLE_CLOSE_TIME",
       preserveDexMetadataInSidecar: true,
     },
+    replaySafety: truthManifest.replaySafety,
+    ...(truthManifest.backfillCompleteness !== undefined
+      ? { backfillCompleteness: truthManifest.backfillCompleteness }
+      : {}),
   };
 
   const manifestKey = `${rootKey}/manifest.json`;

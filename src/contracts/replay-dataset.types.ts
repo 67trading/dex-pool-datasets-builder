@@ -1,4 +1,5 @@
 import type { Timeframe } from "./timeframe.js";
+import type { BackfillCompleteness } from "../types/dex-pool-dataset.types.js";
 
 export type DatasetSource = "DEX_POOL";
 export type DatasetVersion = "dex-pool-replay-v1";
@@ -59,7 +60,7 @@ export type DatasetManifest = {
   };
   sourceDataset: {
     datasetId: string;
-    sourceMode: "ONCHAIN_POOL_EVENTS";
+    sourceMode: "ONCHAIN_POOL_EVENTS" | "ONCHAIN_TX_TOKEN_BALANCE_DIFF";
     chain: string;
     dex: string;
     poolAddress: string;
@@ -70,4 +71,19 @@ export type DatasetManifest = {
     availableFromPolicy: "CANDLE_CLOSE_TIME";
     preserveDexMetadataInSidecar: true;
   };
+
+  /**
+   * Carried through verbatim from the source-of-truth manifest so a
+   * consumer reading only this replay-compatible file still gets the
+   * attribution/completeness honesty guarantees — see
+   * DexPoolDatasetManifest.replaySafety.
+   */
+  replaySafety: {
+    closedCandlesOnly: true;
+    availableFromCloseTime: true;
+    lookaheadSafe: true;
+    intrablockOrderingPreserved: boolean;
+    poolVolumeExact: boolean;
+  };
+  backfillCompleteness?: BackfillCompleteness;
 };

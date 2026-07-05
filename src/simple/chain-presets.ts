@@ -42,6 +42,19 @@ export const SIMPLE_CHAIN_PRESETS: Record<DexChain, SimpleChainPreset> = {
     defaultRpcUrlEnv: "BSC_RPC_URL",
     finalityConfirmations: 64,
   },
+
+  /**
+   * Solana has no EVM-style chainId; the simple/ CLI resolution path
+   * (chainId handshake, eth_getLogs-based factory resolution) does not
+   * apply to it. Solana builds go through the registry/config path with
+   * pools produced by src/solana/* adapters instead of this preset table.
+   */
+  solana: {
+    chain: "solana",
+    chainId: 0,
+    defaultRpcUrlEnv: "SOLANA_RPC_URL",
+    finalityConfirmations: 32,
+  },
 };
 
 export function getSimpleChainPreset(chain: string): SimpleChainPreset {

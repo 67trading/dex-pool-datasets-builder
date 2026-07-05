@@ -6,6 +6,7 @@ import { buildCandlesFromSwaps } from "../candles/pool-candle-builder.js";
 import { fillNoTradeIntervals } from "../candles/no-trade-fill-policy.js";
 import { aggregateDexPoolCandles } from "../candles/timeframe-aggregator.js";
 import { readUniswapV3PoolSwapsWithQuality } from "../evm/evm-pool-event-reader.js";
+import { readSolanaAmmPoolSwapsWithQuality } from "../solana/solana-pool-swap-reader.js";
 import { exportDexWalkForwardDatasetToStorage } from "../export/walk-forward-storage-export-adapter.js";
 import {
   validatePoolRegistry,
@@ -14,6 +15,7 @@ import {
 import { resolveDatasetStorage } from "../storage/resolve-dataset-storage.js";
 import type { ResolvedDexBuildConfig } from "../config/dex-build-config.types.js";
 import type {
+  BackfillCompleteness,
   DexPoolCandle,
   DexPoolConfig,
   DexPoolDatasetManifest,
@@ -101,16 +103,43 @@ export async function buildDexPoolDataset(
           ? join(options.cacheDir, pool.chain, "block-timestamps.jsonl")
           : undefined;
 
-      const { swaps, quality } = await readUniswapV3PoolSwapsWithQuality({
-        pool,
-        rpcUrl: options.network.rpcUrl,
-        fromBlock: options.build.fromBlock,
-        toBlock: options.build.toBlock,
-        chunkSize: options.build.chunkSize,
-        failFast: options.build.failFast,
-        timestampCachePath,
-        onProgress: hooks.onProgress,
-      });
+      let swaps;
+      let quality;
+      let intrablockOrderingPreserved = true;
+      let poolVolumeExact = true;
+      let backfillCompleteness: BackfillCompleteness | undefined;
+
+      if (pool.kind === "SOLANA_AMM_STYLE") {
+        const solanaResult = await readSolanaAmmPoolSwapsWithQuality({
+          pool,
+          rpcUrl: options.network.rpcUrl,
+          fromBlock: options.build.fromBlock,
+          toBlock: options.build.toBlock,
+          failFast: options.build.failFast,
+          onProgress: hooks.onProgress,
+        });
+        swaps = solanaResult.swaps;
+        quality = solanaResult.quality;
+        intrablockOrderingPreserved = solanaResult.intrablockOrderingPreserved;
+        // Transaction-wide token-balance-diff attribution can't guarantee
+        // exact single-pool volume for multi-hop routed transactions —
+        // see solana-pool-swap-reader.ts and DexPoolCandleQualityFlags.
+        poolVolumeExact = false;
+        backfillCompleteness = solanaResult.backfillCompleteness;
+      } else {
+        const evmResult = await readUniswapV3PoolSwapsWithQuality({
+          pool,
+          rpcUrl: options.network.rpcUrl,
+          fromBlock: options.build.fromBlock,
+          toBlock: options.build.toBlock,
+          chunkSize: options.build.chunkSize,
+          failFast: options.build.failFast,
+          timestampCachePath,
+          onProgress: hooks.onProgress,
+        });
+        swaps = evmResult.swaps;
+        quality = evmResult.quality;
+      }
 
       if (swaps.length === 0) {
         const message = `NO_SWAPS_IN_RANGE:${pool.id}:${options.build.fromBlock.toString()}:${options.build.toBlock.toString()}`;
@@ -223,7 +252,10 @@ export async function buildDexPoolDataset(
 
       const truthManifest: DexPoolDatasetManifest = {
         datasetType: "DEX_POOL",
-        sourceMode: "ONCHAIN_POOL_EVENTS",
+        sourceMode:
+          pool.kind === "SOLANA_AMM_STYLE"
+            ? "ONCHAIN_TX_TOKEN_BALANCE_DIFF"
+            : "ONCHAIN_POOL_EVENTS",
         datasetId: options.datasetId,
         chain: pool.chain,
         dex: pool.dex,
@@ -254,11 +286,18 @@ export async function buildDexPoolDataset(
           to: new Date(globalLastCloseTime).toISOString(),
         },
 
-        source: {
-          rpcProvider: "configured_archive_rpc",
-          eventSource: "eth_getLogs",
-          events: ["Swap"],
-        },
+        source:
+          pool.kind === "SOLANA_AMM_STYLE"
+            ? {
+                rpcProvider: "configured_archive_rpc",
+                eventSource: "solana_transaction_token_balance_diff",
+                events: ["Swap"],
+              }
+            : {
+                rpcProvider: "configured_archive_rpc",
+                eventSource: "eth_getLogs",
+                events: ["Swap"],
+              },
 
         timeframes: options.build.timeframes,
 
@@ -266,8 +305,11 @@ export async function buildDexPoolDataset(
           closedCandlesOnly: true,
           availableFromCloseTime: true,
           lookaheadSafe: true,
-          intrablockOrderingPreserved: true,
+          intrablockOrderingPreserved,
+          poolVolumeExact,
         },
+
+        ...(backfillCompleteness !== undefined ? { backfillCompleteness } : {}),
 
         quality,
         generatedAt: new Date().toISOString(),

@@ -1,12 +1,18 @@
 # @dex-pool-datasets
 
-Build replay-compatible DEX pool candle datasets from on-chain Uniswap v3-style pool events.
+Multi-chain DEX dataset builder. Three separate dataset families, each with its own honesty guarantees:
+
+1. **DEX pool candles** (`DEX_POOL`) — replay-compatible OHLCV candles built from real on-chain pool events. EVM (Uniswap-v3-style `eth_getLogs`) and Solana (AMM program transactions, see below) both produce this same dataset shape.
+2. **Jupiter executions** (`JUPITER_EXECUTION`) — historical record of executed Jupiter-routed Solana swaps (input/output mint, amount, route legs), built from `getSignaturesForAddress`/`getTransaction` against the Jupiter aggregator program.
+3. **Jupiter quote snapshots** (`JUPITER_QUOTE_SNAPSHOT`) — forward-only routing snapshots from the Jupiter quote API. Valid only from the moment you sample them; not a historical or replay-safe source.
+
+Jupiter quotes tell you what the router would do *right now* — they are not a substitute for real pool event history. See [Solana & Jupiter datasets](#solana--jupiter-datasets) below.
 
 ```bash
 dex-pool build base:WETH/USDC --fee 500 --days 30
 ```
 
-No config file is required for normal usage.
+No config file is required for normal EVM usage.
 
 ## Install
 
@@ -37,6 +43,7 @@ BASE_RPC_URL=https://your-base-archive-rpc
 ETH_RPC_URL=https://your-ethereum-archive-rpc
 ARBITRUM_RPC_URL=https://your-arbitrum-archive-rpc
 POLYGON_RPC_URL=https://your-polygon-archive-rpc
+SOLANA_RPC_URL=https://your-solana-rpc
 ```
 
 The CLI loads `.env` automatically.
@@ -232,6 +239,94 @@ run-report.json
 | Base     |   `8453` | `BASE_RPC_URL`     |
 | Arbitrum |  `42161` | `ARBITRUM_RPC_URL` |
 | Polygon  |    `137` | `POLYGON_RPC_URL`  |
+| BSC      |     `56` | `BSC_RPC_URL`      |
+| Solana   |      n/a | `SOLANA_RPC_URL`   |
+
+Solana has no `simple` mode (no factory/`getPool` equivalent to resolve a pair selector on-chain), so Solana pools go through the registry/config build path — see below.
+
+## Solana & Jupiter datasets
+
+### 1. Solana AMM pool candles (`DEX_POOL` / `SOLANA_AMM_STYLE`)
+
+Real on-chain pool swaps, decoded via a transaction-wide token-balance-diff technique (no per-protocol instruction byte parsing) against a small allowlist of known AMM programs (Orca Whirlpool, Raydium AMM v4/CLMM/CPMM, Meteora DLMM/Dynamic AMM — see `src/solana/solana-amm-program-registry.ts`). This produces the exact same `DexPoolCandle`/candle-JSONL/manifest shape as the EVM path.
+
+Solana pools build through the registry/config path (there's no on-chain factory to resolve a pair selector the way Uniswap v3 has):
+
+```bash
+SOLANA_RPC_URL=https://your-solana-rpc \
+dex-pool build --registry-config config/dex-dataset.solana.example.json --verbose
+```
+
+The registry config references a separate pool-registry JSON (`config/dex-pools.solana.example.json`) with entries shaped like:
+
+```json
+{
+  "id": "solana-raydium-ray-usdc",
+  "chain": "solana",
+  "dex": "raydium",
+  "kind": "SOLANA_AMM_STYLE",
+  "poolAddress": "6UmmUiYoBjSrhakAobJw8BvkmJtDVxaeBtbt7rxWo1mg",
+  "programId": "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+  "token0": { "symbol": "RAY", "address": "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R", "decimals": 6 },
+  "token1": { "symbol": "USDC", "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "decimals": 6 },
+  "baseToken": "token0",
+  "quoteToken": "token1",
+  "startBlock": "430000000"
+}
+```
+
+`startBlock`/`endBlock` (and the build config's `fromBlock`/`toBlock`) are Solana **slot** numbers for Solana pools.
+
+**Honesty fields — read these before treating Solana output as exact.** The token-balance-diff technique is a good-faith extractor, not a protocol-verified one. Every Solana build surfaces exactly how approximate it is, both per-swap and at the manifest level, rather than presenting itself as identically trustworthy to the EVM log-decoded path:
+
+- `NormalizedPoolSwap.attributionMode`: `"EXACT_LOG_DECODE"` (EVM) vs `"TX_GROSS_TOKEN_BALANCE_DIFF"` (Solana).
+- Per-swap/candle `qualityFlags` (Solana only): `multiAmmTransaction` and `multiHopSuspected` (another AMM program, or any non-infrastructure program, ran in the same transaction — the recorded amount may include another leg's contribution), `sameMintExtraTransfers` (the positive/negative token deltas for a mint didn't balance — a transient wrap/unwrap account or an unrelated transfer is likely present), `nativeSolRentAmbiguity` (native SOL involved, so ATA rent create/close noise is possible), `poolVaultsNotVerified` (always set — the technique never confirms which accounts are the pool's actual vaults), `orderingApproximate` (no reliable in-slot transaction index was available; ordering fell back to a deterministic-but-not-necessarily-chronological signature tiebreaker).
+- Manifest `replaySafety.poolVolumeExact`: `false` for every Solana (`TX_GROSS_TOKEN_BALANCE_DIFF`) pool, `true` for EVM.
+- Manifest `replaySafety.intrablockOrderingPreserved`: `false` if *any* swap in the dataset lacked a real transaction index (see `orderingApproximate` above); always `true` for EVM.
+- Manifest `backfillCompleteness` (Solana only): `getSignaturesForAddress` pages newest-first with a signature cursor, not a slot-range filter — for a high-volume address and an old requested range, the scan can exhaust its page/signature budget before ever reaching `fromSlot`. Check `rangeComplete` and `stopReason` (`REACHED_FROM_SLOT` / `EMPTY_PAGE` = complete; `MAX_SCANNED_PAGES` / `MAX_SIGNATURES_COLLECTED` / `RPC_LIMIT` = not guaranteed complete) before treating a Solana pool dataset as a full backfill of the requested range.
+
+For a genuine multi-hop route where this pool is one of several legs, the transaction-wide balance diff reflects the whole route's net movement of the pool's two mints, not this leg's amount alone — there's no per-instruction balance snapshot to isolate it further without protocol-specific decoding. Direct (single-hop, single-pool) swaps are expected to be accurate when no unrelated same-mint movements are present, but this is still a transaction-level token-balance diff, not protocol-verified pool-vault decoding — `qualityFlags.poolVaultsNotVerified` is always set for Solana swaps precisely because the technique never confirms which accounts are the pool's actual vaults. See `src/solana/solana-pool-swap-reader.ts` for the full implementation and `src/solana/solana-pool-swap-reader.test.ts` for a regression test against a real multi-hop transaction.
+
+### 2. Discover which pools matter (`jupiter-discover`)
+
+Jupiter is used here purely as **routing/discovery context** — it tells you which pools are actually seeing volume so you know what to add to the registry above. It is never the candle source itself.
+
+```bash
+SOLANA_RPC_URL=https://your-solana-rpc \
+dex-pool jupiter-discover \
+  --input So11111111111111111111111111111111111111112 \
+  --output 4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R \
+  --amounts 100000000,1000000000,5000000000 \
+  --symbols "SOL=So11111111111111111111111111111111111111112,RAY=4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R"
+```
+
+Route legs that resolve to a program in the known-AMM registry are printed as pool candidates (promote them into a registry file by adding `id`/`startBlock`); legs on unrecognized programs (private market makers, RFQ venues, newer AMMs) are reported separately rather than silently dropped — today's live routing landscape includes many venues beyond Orca/Raydium/Meteora.
+
+### 3. Historical executed Jupiter swaps (`jupiter-executions`)
+
+```bash
+SOLANA_RPC_URL=https://your-solana-rpc \
+dex-pool jupiter-executions --from-slot 430949000 --to-slot 430950000 --verbose
+```
+
+Writes `jupiter-executions.jsonl` + `jupiter-execution-quality.json` + `manifest.json` (`datasetType: JUPITER_EXECUTION`) with one record per executed swap: signature, slot, signer, input/output mint + amount, and recognized AMM programs. Input/output mint and amount are derived from the signing wallet's own token-balance deltas (plus native SOL lamport delta) — this is the whole-route net effect the trader experienced, not a per-leg breakdown, which is the right level of aggregation here (unlike pool candles, where mixing in another leg's amount would be wrong).
+
+Every record carries a confidence signal instead of presenting itself as unconditionally exact:
+
+- `resolutionConfidence`: `HIGH` / `MEDIUM` / `LOW`. `LOW` when there's more than one signer (`multiSigner`/`feePayerNotTokenOwner` — the assumed trader might not be the economically relevant party) or more than one candidate input/output mint (`multipleNegativeDeltas`/`multiplePositiveDeltas` — the largest delta was picked, not unambiguous). `MEDIUM` when native SOL is the input or output (`nativeSolRentAmbiguity` — ATA rent create/close noise can distort the lamport delta). `HIGH` otherwise.
+- `resolutionMethod`: `SIGNER_TOKEN_BALANCE_DIFF` or `FEE_PAYER_NATIVE_SOL_ADJUSTED`.
+- `recognizedAmmPrograms` + `routeLegsApproximate: true`: programs from `solana-amm-program-registry.ts` seen in the transaction's inner instructions — **not** a reconstruction of Jupiter's actual routePlan (no per-leg amounts, split percentages, or hop order; unrecognized programs are simply absent).
+- `manifest.backfillCompleteness`: same honesty contract as the pool-candle path above — Jupiter's on-chain volume is very high (order of 10+ transactions per slot at times), so check `rangeComplete`/`stopReason` before assuming a full backfill. Size your slot range and RPC provider accordingly; a public shared RPC endpoint will rate-limit hard over more than a few hundred slots.
+
+### 4. Forward-only quote snapshots (`jupiter-quotes`)
+
+```bash
+dex-pool jupiter-quotes \
+  --pair So11111111111111111111111111111111111111112:EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v:1000000000 \
+  --interval-seconds 60 --duration-seconds 3600
+```
+
+Writes `jupiter-quote-snapshots.jsonl` + `manifest.json` (`datasetType: JUPITER_QUOTE_SNAPSHOT`). Explicitly **not historical** — every record is only valid from the moment it was sampled, and there is no way to backfill Jupiter quotes for the past.
 
 ## Backward compatibility
 
@@ -239,6 +334,12 @@ Config builds still work:
 
 ```bash
 dex-pool build --config dex-pool.config.json
+```
+
+`--config` uses the simple chain/pair/fee-shaped config (EVM only). For the full network+registry+build JSON shape (`config/dex-dataset.*.example.json`) — required for Solana, optional for EVM — use `--registry-config` instead:
+
+```bash
+dex-pool build --registry-config config/dex-dataset.solana.example.json
 ```
 
 New usage should prefer direct CLI commands:
@@ -268,4 +369,8 @@ BASE_RPC_URL=... dex-pool doctor base
 BASE_RPC_URL=... dex-pool discover-cache status base
 BASE_RPC_URL=... dex-pool discover-cache init base
 BASE_RPC_URL=... dex-pool discover base --by quoteVolume --quote USDC --top 20
+SOLANA_RPC_URL=... dex-pool build --registry-config config/dex-dataset.solana.example.json
+SOLANA_RPC_URL=... dex-pool jupiter-discover --input <mint> --output <mint>
+SOLANA_RPC_URL=... dex-pool jupiter-executions --from-slot <slot> --to-slot <slot>
+dex-pool jupiter-quotes --pair <inputMint>:<outputMint>:<amount>
 ```

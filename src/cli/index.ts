@@ -10,6 +10,9 @@ import { registerInitCommand } from "./commands/init.command.js";
 import { registerRunCommand } from "./commands/run.command.js";
 import { registerPlanCommand } from "./commands/plan.command.js";
 import { registerValidateCommand } from "./commands/validate.command.js";
+import { registerJupiterDiscoverCommand } from "./commands/jupiter-discover.command.js";
+import { registerJupiterExecutionsCommand } from "./commands/jupiter-executions.command.js";
+import { registerJupiterQuotesCommand } from "./commands/jupiter-quotes.command.js";
 
 const program = new Command();
 
@@ -27,6 +30,9 @@ registerDoctorCommand(program);
 registerInitCommand(program);
 registerPlanCommand(program);
 registerValidateCommand(program);
+registerJupiterDiscoverCommand(program);
+registerJupiterExecutionsCommand(program);
+registerJupiterQuotesCommand(program);
 
 program.parseAsync(process.argv).catch((error: unknown) => {
   process.stderr.write(`${String(error instanceof Error ? error.message : error)}\n`);

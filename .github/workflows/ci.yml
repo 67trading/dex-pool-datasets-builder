@@ -40,6 +40,9 @@ jobs:
           node dist/cli/index.js doctor --help
           node dist/cli/index.js plan --help
           node dist/cli/index.js validate --help
+          node dist/cli/index.js jupiter-discover --help
+          node dist/cli/index.js jupiter-executions --help
+          node dist/cli/index.js jupiter-quotes --help
 
       - name: Test
         run: npm test
