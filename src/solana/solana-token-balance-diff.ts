@@ -24,10 +24,22 @@ import type {
  * AMM program (see solana-pool-swap-reader.ts) rather than arbitrary
  * multi-hop routed transactions.
  */
-export function computeMintGrossDeltaRaw(
+export type MintGrossDelta = {
+  grossRaw: bigint;
+
+  /**
+   * False when the positive and negative sums didn't match — a sign that
+   * a transient (create+close within the tx) account is invisible on one
+   * side, or that an unrelated transfer of the same mint is present.
+   * Surfaced by the reader as qualityFlags.sameMintExtraTransfers.
+   */
+  balanced: boolean;
+};
+
+export function computeMintGrossDelta(
   meta: Pick<SolanaTransactionMeta, "preTokenBalances" | "postTokenBalances">,
   mint: string,
-): bigint {
+): MintGrossDelta {
   const preByIndex = indexByAccount(meta.preTokenBalances, mint);
   const postByIndex = indexByAccount(meta.postTokenBalances, mint);
 
@@ -51,7 +63,10 @@ export function computeMintGrossDeltaRaw(
     }
   }
 
-  return sumPositive > sumNegative ? sumPositive : sumNegative;
+  return {
+    grossRaw: sumPositive > sumNegative ? sumPositive : sumNegative,
+    balanced: sumPositive === sumNegative,
+  };
 }
 
 function indexByAccount(

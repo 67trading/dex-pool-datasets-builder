@@ -9,14 +9,17 @@ import {
   findSolanaAmmProgram,
   JUPITER_V6_PROGRAM_ID,
 } from "../solana/solana-amm-program-registry.js";
+import { NATIVE_SOL_MINT } from "../solana/solana-infra-programs.js";
 import { fetchMintDecimals } from "../solana/solana-mint-metadata.js";
+import type { BackfillCompleteness } from "../types/dex-pool-dataset.types.js";
 import type {
-  JupiterExecutionLeg,
+  JupiterExecutionQualityFlags,
   JupiterExecutionQualitySummary,
   JupiterExecutionRecord,
+  JupiterExecutionResolutionConfidence,
+  JupiterExecutionResolutionMethod,
+  JupiterRecognizedAmmProgram,
 } from "./jupiter-execution.types.js";
-
-const NATIVE_SOL_MINT = "So11111111111111111111111111111111111111112";
 
 export type ReadJupiterExecutionsOptions = {
   rpcUrl: string;
@@ -26,6 +29,7 @@ export type ReadJupiterExecutionsOptions = {
   failFast?: boolean;
   pageLimit?: number;
   maxSignatures?: number;
+  maxScannedPages?: number;
   resolveDecimals?: boolean;
   onProgress?: (event: { type: "executions_decoded"; count: number }) => void;
 };
@@ -33,6 +37,7 @@ export type ReadJupiterExecutionsOptions = {
 export type ReadJupiterExecutionsResult = {
   executions: JupiterExecutionRecord[];
   quality: JupiterExecutionQualitySummary;
+  backfillCompleteness: BackfillCompleteness;
 };
 
 export async function readJupiterExecutionsWithQuality(
@@ -55,17 +60,18 @@ export async function readJupiterExecutionsWithQuality(
     incompleteRanges: 0,
   };
 
-  const { signatures, incompleteRangeCount } = await collectSignaturesInSlotRange({
+  const paginationResult = await collectSignaturesInSlotRange({
     client,
     address: JUPITER_V6_PROGRAM_ID,
     fromSlot: options.fromBlock,
     toSlot: options.toBlock,
     pageLimit: options.pageLimit,
     maxSignatures: options.maxSignatures,
+    maxScannedPages: options.maxScannedPages,
     failFast,
   });
-  quality.incompleteRanges += incompleteRangeCount;
-  if (incompleteRangeCount > 0) quality.passed = false;
+  quality.incompleteRanges += paginationResult.incompleteRangeCount;
+  if (paginationResult.incompleteRangeCount > 0) quality.passed = false;
 
   const executions: JupiterExecutionRecord[] = [];
   const seenSignatures = new Set<string>();
@@ -85,7 +91,7 @@ export async function readJupiterExecutionsWithQuality(
     }
   }
 
-  for (const sigInfo of signatures) {
+  for (const sigInfo of paginationResult.signatures) {
     if (seenSignatures.has(sigInfo.signature)) {
       quality.duplicateSignatures += 1;
       quality.passed = false;
@@ -141,12 +147,35 @@ export async function readJupiterExecutionsWithQuality(
     const input = negatives[0]!;
     const output = positives[0]!;
 
-    const legs = collectLegs(tx);
+    const recognizedAmmPrograms = collectRecognizedAmmPrograms(tx);
 
     const [inputDecimals, outputDecimals] = await Promise.all([
       getDecimals(input.mint),
       getDecimals(output.mint),
     ]);
+
+    const signerCount = countSigners(tx.transaction.message.accountKeys);
+    const multiSigner = signerCount > 1;
+    const involvesNativeSol =
+      input.mint === NATIVE_SOL_MINT || output.mint === NATIVE_SOL_MINT;
+
+    const qualityFlags: JupiterExecutionQualityFlags = {
+      ...(multiSigner ? { multiSigner: true, feePayerNotTokenOwner: true } : {}),
+      ...(involvesNativeSol ? { nativeSolRentAmbiguity: true } : {}),
+      ...(negatives.length > 1 ? { multipleNegativeDeltas: true } : {}),
+      ...(positives.length > 1 ? { multiplePositiveDeltas: true } : {}),
+    };
+
+    const resolutionMethod: JupiterExecutionResolutionMethod = involvesNativeSol
+      ? "FEE_PAYER_NATIVE_SOL_ADJUSTED"
+      : "SIGNER_TOKEN_BALANCE_DIFF";
+
+    const resolutionConfidence: JupiterExecutionResolutionConfidence =
+      multiSigner || negatives.length > 1 || positives.length > 1
+        ? "LOW"
+        : involvesNativeSol
+          ? "MEDIUM"
+          : "HIGH";
 
     executions.push({
       signature: sigInfo.signature,
@@ -164,7 +193,11 @@ export async function readJupiterExecutionsWithQuality(
       otherMintDeltasRaw: mintDeltas
         .filter((d) => d !== input && d !== output)
         .map((d) => ({ mint: d.mint, deltaRaw: d.deltaRaw.toString() })),
-      legs,
+      recognizedAmmPrograms,
+      routeLegsApproximate: true,
+      resolutionConfidence,
+      resolutionMethod,
+      qualityFlags,
     });
 
     if (executions.length % 100 === 0) {
@@ -179,7 +212,18 @@ export async function readJupiterExecutionsWithQuality(
     return (a.transactionIndex ?? 0) - (b.transactionIndex ?? 0);
   });
 
-  return { executions, quality };
+  return {
+    executions,
+    quality,
+    backfillCompleteness: {
+      requestedFromSlot: options.fromBlock.toString(),
+      requestedToSlot: options.toBlock.toString(),
+      scannedSignatureCount: paginationResult.scannedSignatureCount,
+      collectedSignatureCount: paginationResult.signatures.length,
+      rangeComplete: paginationResult.rangeComplete,
+      stopReason: paginationResult.stopReason,
+    },
+  };
 }
 
 function accountKeyToString(
@@ -187,6 +231,14 @@ function accountKeyToString(
 ): string | undefined {
   if (key === undefined) return undefined;
   return typeof key === "string" ? key : key.pubkey;
+}
+
+function countSigners(
+  accountKeys: Array<string | { pubkey: string; signer?: boolean; writable?: boolean }>,
+): number {
+  return accountKeys.filter(
+    (key) => typeof key !== "string" && key.signer === true,
+  ).length;
 }
 
 function computeSignerMintDeltas(
@@ -233,9 +285,11 @@ function indexSignerBalances(
   return map;
 }
 
-function collectLegs(tx: SolanaTransactionResult): JupiterExecutionLeg[] {
+function collectRecognizedAmmPrograms(
+  tx: SolanaTransactionResult,
+): JupiterRecognizedAmmProgram[] {
   const seen = new Set<string>();
-  const legs: JupiterExecutionLeg[] = [];
+  const programs: JupiterRecognizedAmmProgram[] = [];
 
   for (const group of tx.meta?.innerInstructions ?? []) {
     for (const instruction of group.instructions) {
@@ -244,11 +298,11 @@ function collectLegs(tx: SolanaTransactionResult): JupiterExecutionLeg[] {
       const registryEntry = findSolanaAmmProgram(programId);
       if (registryEntry === undefined) continue;
       seen.add(programId);
-      legs.push({ programId, dex: registryEntry.dex, label: registryEntry.label });
+      programs.push({ programId, dex: registryEntry.dex, label: registryEntry.label });
     }
   }
 
-  return legs;
+  return programs;
 }
 
 function extractInstructionName(tx: SolanaTransactionResult): string | undefined {

@@ -2,6 +2,8 @@ import type { Timeframe } from "../contracts/timeframe.js";
 import { getTimeframeMs } from "../contracts/timeframe.js";
 import type {
   DexPoolCandle,
+  DexPoolCandleQualityFlags,
+  DexPoolCandleSource,
   DexPoolConfig,
   DexPoolSwapRawAudit,
   NormalizedPoolSwap,
@@ -100,7 +102,7 @@ function buildCandleFromBucket(
     volumeQuote: quoteAmount,
     tradeCount: bucket.length,
     source: {
-      mode: "ONCHAIN_POOL_EVENTS",
+      mode: sourceModeForBucket(bucket),
       fromOrderingKey: first.orderingKey,
       toOrderingKey: last.orderingKey,
       txRefRange: [first.txRef, last.txRef],
@@ -109,8 +111,44 @@ function buildCandleFromBucket(
         last: buildRawSwapAudit(last),
       },
     },
-    qualityFlags: bucket.length <= 1 ? { lowTradeCount: true } : {},
+    qualityFlags: buildBucketQualityFlags(bucket),
   };
+}
+
+function sourceModeForBucket(
+  bucket: NormalizedPoolSwap[],
+): DexPoolCandleSource["mode"] {
+  return bucket.some((swap) => swap.attributionMode === "TX_GROSS_TOKEN_BALANCE_DIFF")
+    ? "ONCHAIN_TX_TOKEN_BALANCE_DIFF"
+    : "ONCHAIN_POOL_EVENTS";
+}
+
+function buildBucketQualityFlags(
+  bucket: NormalizedPoolSwap[],
+): DexPoolCandleQualityFlags {
+  const flags: DexPoolCandleQualityFlags = {};
+
+  if (bucket.length <= 1) flags.lowTradeCount = true;
+  if (bucket.some((swap) => swap.qualityFlags?.multiAmmTransaction === true)) {
+    flags.multiAmmTransaction = true;
+  }
+  if (bucket.some((swap) => swap.qualityFlags?.multiHopSuspected === true)) {
+    flags.multiHopSuspected = true;
+  }
+  if (bucket.some((swap) => swap.qualityFlags?.sameMintExtraTransfers === true)) {
+    flags.sameMintExtraTransfers = true;
+  }
+  if (bucket.some((swap) => swap.qualityFlags?.nativeSolRentAmbiguity === true)) {
+    flags.nativeSolRentAmbiguity = true;
+  }
+  if (bucket.some((swap) => swap.qualityFlags?.poolVaultsNotVerified === true)) {
+    flags.poolVaultsNotVerified = true;
+  }
+  if (bucket.some((swap) => swap.qualityFlags?.orderingApproximate === true)) {
+    flags.orderingApproximate = true;
+  }
+
+  return flags;
 }
 
 function assertUniqueSwapEvents(swaps: NormalizedPoolSwap[]): void {
@@ -174,6 +212,12 @@ function buildRawSwapAudit(swap: NormalizedPoolSwap): DexPoolSwapRawAudit {
     orderingKey: swap.orderingKey,
     ...(swap.amount0Raw !== undefined ? { amount0Raw: swap.amount0Raw } : {}),
     ...(swap.amount1Raw !== undefined ? { amount1Raw: swap.amount1Raw } : {}),
+    ...(swap.token0Decimals !== undefined
+      ? { token0Decimals: swap.token0Decimals }
+      : {}),
+    ...(swap.token1Decimals !== undefined
+      ? { token1Decimals: swap.token1Decimals }
+      : {}),
     ...(swap.sqrtPriceX96Raw !== undefined
       ? { sqrtPriceX96Raw: swap.sqrtPriceX96Raw }
       : {}),

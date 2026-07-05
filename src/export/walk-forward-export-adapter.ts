@@ -120,7 +120,7 @@ export async function exportDexWalkForwardDataset(
     },
     sourceDataset: {
       datasetId: options.truthManifest.datasetId,
-      sourceMode: "ONCHAIN_POOL_EVENTS",
+      sourceMode: options.truthManifest.sourceMode,
       chain: options.truthManifest.chain,
       dex: options.truthManifest.dex,
       poolAddress: options.truthManifest.poolAddress,
@@ -131,6 +131,10 @@ export async function exportDexWalkForwardDataset(
       availableFromPolicy: "CANDLE_CLOSE_TIME",
       preserveDexMetadataInSidecar: true,
     },
+    replaySafety: options.truthManifest.replaySafety,
+    ...(options.truthManifest.backfillCompleteness !== undefined
+      ? { backfillCompleteness: options.truthManifest.backfillCompleteness }
+      : {}),
   };
 
   await writeJson(join(outputDir, "manifest.json"), manifest);

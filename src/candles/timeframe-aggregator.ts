@@ -76,6 +76,24 @@ function aggregateBucket(
       ...(bucket.some((candle) => candle.qualityFlags.lowTradeCount)
         ? { lowTradeCount: true }
         : {}),
+      ...(bucket.some((candle) => candle.qualityFlags.multiAmmTransaction)
+        ? { multiAmmTransaction: true }
+        : {}),
+      ...(bucket.some((candle) => candle.qualityFlags.multiHopSuspected)
+        ? { multiHopSuspected: true }
+        : {}),
+      ...(bucket.some((candle) => candle.qualityFlags.sameMintExtraTransfers)
+        ? { sameMintExtraTransfers: true }
+        : {}),
+      ...(bucket.some((candle) => candle.qualityFlags.nativeSolRentAmbiguity)
+        ? { nativeSolRentAmbiguity: true }
+        : {}),
+      ...(bucket.some((candle) => candle.qualityFlags.poolVaultsNotVerified)
+        ? { poolVaultsNotVerified: true }
+        : {}),
+      ...(bucket.some((candle) => candle.qualityFlags.orderingApproximate)
+        ? { orderingApproximate: true }
+        : {}),
     },
   };
 }
@@ -90,7 +108,7 @@ function buildAggregatedSource(
   ].filter((value) => value.length > 0);
 
   return {
-    mode: "ONCHAIN_POOL_EVENTS",
+    mode: first.source.mode,
     ...(first.source.fromOrderingKey !== undefined
       ? { fromOrderingKey: first.source.fromOrderingKey }
       : {}),

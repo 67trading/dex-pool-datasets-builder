@@ -83,11 +83,14 @@ export function decodeUniswapV3SwapLog(input: {
     amount1: formatUnitsToNumber(amount1Raw, input.pool.token1.decimals),
     amount0Raw: amount0Raw.toString(),
     amount1Raw: amount1Raw.toString(),
+    token0Decimals: input.pool.token0.decimals,
+    token1Decimals: input.pool.token1.decimals,
     priceToken1PerToken0,
     priceToken0PerToken1: 1 / priceToken1PerToken0,
     sqrtPriceX96Raw: sqrtPriceX96.toString(),
     liquidityAfter: liquidity.toString(),
     tickAfter: tick,
+    attributionMode: "EXACT_LOG_DECODE",
     raw: input.log,
   };
 }

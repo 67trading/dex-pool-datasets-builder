@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { readSolanaAmmPoolSwapsWithQuality } from "./solana-pool-swap-reader.js";
 import type { DexPoolConfig } from "../types/dex-pool-dataset.types.js";
+import type { SolanaRpcFetch } from "./solana-json-rpc-client.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -34,50 +35,70 @@ const pool: DexPoolConfig = {
   startBlock: "430949599",
 };
 
+function singleSignatureFetch(input: {
+  signature: string;
+  slot: number;
+  blockTime: number;
+  transactionIndex?: number;
+  tx: unknown;
+}): SolanaRpcFetch {
+  let sigCallCount = 0;
+
+  return async (_url, init) => {
+    const body = JSON.parse(init.body as string) as { method: string };
+
+    if (body.method === "getSignaturesForAddress") {
+      sigCallCount += 1;
+      const result =
+        sigCallCount === 1
+          ? [
+              {
+                signature: input.signature,
+                slot: input.slot,
+                err: null,
+                blockTime: input.blockTime,
+                confirmationStatus: "finalized",
+                ...(input.transactionIndex !== undefined
+                  ? { transactionIndex: input.transactionIndex }
+                  : {}),
+              },
+            ]
+          : [];
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ jsonrpc: "2.0", id: 1, result }),
+      };
+    }
+
+    if (body.method === "getTransaction") {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ jsonrpc: "2.0", id: 1, result: input.tx }),
+      };
+    }
+
+    throw new Error(`unexpected method ${body.method}`);
+  };
+}
+
 describe("readSolanaAmmPoolSwapsWithQuality (live fixture regression)", () => {
-  it("decodes a real multi-hop Raydium AMM v4 + CLMM transaction into one normalized swap", async () => {
-    let sigCallCount = 0;
+  it("decodes a real multi-hop Raydium AMM v4 + CLMM transaction, flagging the multi-hop attribution caveat", async () => {
+    const fixtureResult = fixture.result as { blockTime: number; transactionIndex: number };
 
     const result = await readSolanaAmmPoolSwapsWithQuality({
       pool,
       rpcUrl: "http://fake",
       fromBlock: BigInt(SLOT),
       toBlock: BigInt(SLOT),
-      fetchFn: async (_url, init) => {
-        const body = JSON.parse(init.body as string) as { method: string };
-
-        if (body.method === "getSignaturesForAddress") {
-          sigCallCount += 1;
-          const result =
-            sigCallCount === 1
-              ? [
-                  {
-                    signature: SIGNATURE,
-                    slot: SLOT,
-                    err: null,
-                    blockTime: (fixture.result as { blockTime: number }).blockTime,
-                    confirmationStatus: "finalized",
-                    transactionIndex: (fixture.result as { transactionIndex: number }).transactionIndex,
-                  },
-                ]
-              : [];
-          return {
-            ok: true,
-            status: 200,
-            text: async () => JSON.stringify({ jsonrpc: "2.0", id: 1, result }),
-          };
-        }
-
-        if (body.method === "getTransaction") {
-          return {
-            ok: true,
-            status: 200,
-            text: async () => JSON.stringify({ jsonrpc: "2.0", id: 1, result: fixture.result }),
-          };
-        }
-
-        throw new Error(`unexpected method ${body.method}`);
-      },
+      fetchFn: singleSignatureFetch({
+        signature: SIGNATURE,
+        slot: SLOT,
+        blockTime: fixtureResult.blockTime,
+        transactionIndex: fixtureResult.transactionIndex,
+        tx: fixture.result,
+      }),
     });
 
     expect(result.swaps).toHaveLength(1);
@@ -87,6 +108,71 @@ describe("readSolanaAmmPoolSwapsWithQuality (live fixture regression)", () => {
     expect(swap.amount1).toBeCloseTo(120.754344);
     expect(swap.priceToken1PerToken0).toBeCloseTo(0.7105788228648096);
     expect(swap.orderingKey).toBe(`00000000000${SLOT}:00001300:${SIGNATURE}`);
+    expect(swap.attributionMode).toBe("TX_GROSS_TOKEN_BALANCE_DIFF");
     expect(result.quality.passed).toBe(true);
+
+    // This transaction is a real 2-hop route (Raydium AMM v4 -> Raydium
+    // CLMM) — must NOT be presented as an unambiguous single-pool swap.
+    expect(swap.qualityFlags?.multiAmmTransaction).toBe(true);
+    expect(swap.qualityFlags?.multiHopSuspected).toBe(true);
+    expect(swap.qualityFlags?.poolVaultsNotVerified).toBe(true);
+    expect(swap.qualityFlags?.sameMintExtraTransfers).toBeUndefined();
+
+    expect(result.intrablockOrderingPreserved).toBe(true);
+    expect(result.backfillCompleteness.rangeComplete).toBe(true);
+  });
+
+  it("flags orderingApproximate and sets intrablockOrderingPreserved=false when no in-slot transactionIndex is available", async () => {
+    const syntheticTx = {
+      slot: SLOT,
+      blockTime: 1_700_000_000,
+      // no transactionIndex field at all — simulates an RPC provider that
+      // doesn't return one, forcing the signature-only ordering fallback.
+      meta: {
+        err: null,
+        fee: 5000,
+        preBalances: [1_000_000_000],
+        postBalances: [999_995_000],
+        preTokenBalances: [
+          { accountIndex: 1, mint: pool.token0.address, uiTokenAmount: { amount: "1000000000", decimals: 6, uiAmount: null, uiAmountString: "" } },
+          { accountIndex: 2, mint: pool.token1.address, uiTokenAmount: { amount: "0", decimals: 6, uiAmount: null, uiAmountString: "" } },
+        ],
+        postTokenBalances: [
+          { accountIndex: 1, mint: pool.token0.address, uiTokenAmount: { amount: "900000000", decimals: 6, uiAmount: null, uiAmountString: "" } },
+          { accountIndex: 2, mint: pool.token1.address, uiTokenAmount: { amount: "70000000", decimals: 6, uiAmount: null, uiAmountString: "" } },
+        ],
+        innerInstructions: [],
+        logMessages: [],
+      },
+      transaction: {
+        signatures: ["synthetic-sig-no-tx-index"],
+        message: {
+          accountKeys: ["trader", pool.poolAddress],
+          instructions: [
+            { programId: pool.programId, accounts: [pool.poolAddress], data: "" },
+          ],
+        },
+      },
+    };
+
+    const result = await readSolanaAmmPoolSwapsWithQuality({
+      pool,
+      rpcUrl: "http://fake",
+      fromBlock: BigInt(SLOT),
+      toBlock: BigInt(SLOT),
+      fetchFn: singleSignatureFetch({
+        signature: "synthetic-sig-no-tx-index",
+        slot: SLOT,
+        blockTime: 1_700_000_000,
+        tx: syntheticTx,
+      }),
+    });
+
+    expect(result.swaps).toHaveLength(1);
+    expect(result.swaps[0]!.qualityFlags?.orderingApproximate).toBe(true);
+    expect(result.intrablockOrderingPreserved).toBe(false);
+    expect(result.swaps[0]!.orderingKey).toBe(
+      `00000000000${SLOT}:00000000:synthetic-sig-no-tx-index`,
+    );
   });
 });

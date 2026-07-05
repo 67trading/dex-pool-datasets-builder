@@ -277,7 +277,15 @@ The registry config references a separate pool-registry JSON (`config/dex-pools.
 
 `startBlock`/`endBlock` (and the build config's `fromBlock`/`toBlock`) are Solana **slot** numbers for Solana pools.
 
-**Known limitation:** for a multi-hop route where this pool is one of several legs, the transaction-wide balance diff reflects the whole route's net movement of the pool's two mints, not this leg's amount alone — there's no per-instruction balance snapshot to isolate it further without protocol-specific decoding. Direct (single-hop, single-pool) swaps are decoded exactly; see `src/solana/solana-pool-swap-reader.ts` for details.
+**Honesty fields — read these before treating Solana output as exact.** The token-balance-diff technique is a good-faith extractor, not a protocol-verified one. Every Solana build surfaces exactly how approximate it is, both per-swap and at the manifest level, rather than presenting itself as identically trustworthy to the EVM log-decoded path:
+
+- `NormalizedPoolSwap.attributionMode`: `"EXACT_LOG_DECODE"` (EVM) vs `"TX_GROSS_TOKEN_BALANCE_DIFF"` (Solana).
+- Per-swap/candle `qualityFlags` (Solana only): `multiAmmTransaction` and `multiHopSuspected` (another AMM program, or any non-infrastructure program, ran in the same transaction — the recorded amount may include another leg's contribution), `sameMintExtraTransfers` (the positive/negative token deltas for a mint didn't balance — a transient wrap/unwrap account or an unrelated transfer is likely present), `nativeSolRentAmbiguity` (native SOL involved, so ATA rent create/close noise is possible), `poolVaultsNotVerified` (always set — the technique never confirms which accounts are the pool's actual vaults), `orderingApproximate` (no reliable in-slot transaction index was available; ordering fell back to a deterministic-but-not-necessarily-chronological signature tiebreaker).
+- Manifest `replaySafety.poolVolumeExact`: `false` for every Solana (`TX_GROSS_TOKEN_BALANCE_DIFF`) pool, `true` for EVM.
+- Manifest `replaySafety.intrablockOrderingPreserved`: `false` if *any* swap in the dataset lacked a real transaction index (see `orderingApproximate` above); always `true` for EVM.
+- Manifest `backfillCompleteness` (Solana only): `getSignaturesForAddress` pages newest-first with a signature cursor, not a slot-range filter — for a high-volume address and an old requested range, the scan can exhaust its page/signature budget before ever reaching `fromSlot`. Check `rangeComplete` and `stopReason` (`REACHED_FROM_SLOT` / `EMPTY_PAGE` = complete; `MAX_SCANNED_PAGES` / `MAX_SIGNATURES_COLLECTED` / `RPC_LIMIT` = not guaranteed complete) before treating a Solana pool dataset as a full backfill of the requested range.
+
+For a genuine multi-hop route where this pool is one of several legs, the transaction-wide balance diff reflects the whole route's net movement of the pool's two mints, not this leg's amount alone — there's no per-instruction balance snapshot to isolate it further without protocol-specific decoding. Direct (single-hop, single-pool) swaps are decoded exactly. See `src/solana/solana-pool-swap-reader.ts` for the full implementation and `src/solana/solana-pool-swap-reader.test.ts` for a regression test against a real multi-hop transaction.
 
 ### 2. Discover which pools matter (`jupiter-discover`)
 
@@ -301,9 +309,14 @@ SOLANA_RPC_URL=https://your-solana-rpc \
 dex-pool jupiter-executions --from-slot 430949000 --to-slot 430950000 --verbose
 ```
 
-Writes `jupiter-executions.jsonl` + `jupiter-execution-quality.json` + `manifest.json` (`datasetType: JUPITER_EXECUTION`) with one record per executed swap: signature, slot, signer, input/output mint + amount, and recognized route legs. Input/output mint and amount are derived from the signing wallet's own token-balance deltas (plus native SOL lamport delta) — this is the whole-route net effect the trader experienced, not a per-leg breakdown.
+Writes `jupiter-executions.jsonl` + `jupiter-execution-quality.json` + `manifest.json` (`datasetType: JUPITER_EXECUTION`) with one record per executed swap: signature, slot, signer, input/output mint + amount, and recognized AMM programs. Input/output mint and amount are derived from the signing wallet's own token-balance deltas (plus native SOL lamport delta) — this is the whole-route net effect the trader experienced, not a per-leg breakdown, which is the right level of aggregation here (unlike pool candles, where mixing in another leg's amount would be wrong).
 
-Jupiter's on-chain volume is very high (order of 10+ transactions per slot at times) — size your slot range and RPC provider accordingly; a public shared RPC endpoint will rate-limit hard over more than a few hundred slots.
+Every record carries a confidence signal instead of presenting itself as unconditionally exact:
+
+- `resolutionConfidence`: `HIGH` / `MEDIUM` / `LOW`. `LOW` when there's more than one signer (`multiSigner`/`feePayerNotTokenOwner` — the assumed trader might not be the economically relevant party) or more than one candidate input/output mint (`multipleNegativeDeltas`/`multiplePositiveDeltas` — the largest delta was picked, not unambiguous). `MEDIUM` when native SOL is the input or output (`nativeSolRentAmbiguity` — ATA rent create/close noise can distort the lamport delta). `HIGH` otherwise.
+- `resolutionMethod`: `SIGNER_TOKEN_BALANCE_DIFF` or `FEE_PAYER_NATIVE_SOL_ADJUSTED`.
+- `recognizedAmmPrograms` + `routeLegsApproximate: true`: programs from `solana-amm-program-registry.ts` seen in the transaction's inner instructions — **not** a reconstruction of Jupiter's actual routePlan (no per-leg amounts, split percentages, or hop order; unrecognized programs are simply absent).
+- `manifest.backfillCompleteness`: same honesty contract as the pool-candle path above — Jupiter's on-chain volume is very high (order of 10+ transactions per slot at times), so check `rangeComplete`/`stopReason` before assuming a full backfill. Size your slot range and RPC provider accordingly; a public shared RPC endpoint will rate-limit hard over more than a few hundred slots.
 
 ### 4. Forward-only quote snapshots (`jupiter-quotes`)
 

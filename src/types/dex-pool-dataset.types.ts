@@ -106,6 +106,26 @@ export type NormalizedPoolSwap = {
   liquidityAfter?: string;
   tickAfter?: number;
 
+  /**
+   * How amount0/amount1 were derived.
+   *
+   * EXACT_LOG_DECODE: read directly off a protocol event (EVM Swap log) —
+   * exact by construction.
+   * TX_GROSS_TOKEN_BALANCE_DIFF: derived from a transaction-wide
+   * pre/post token balance diff (Solana) — see solana-token-balance-diff.ts.
+   * This is NOT guaranteed to isolate a single pool's contribution when
+   * the same transaction routes through more than one AMM (see
+   * qualityFlags.multiAmmTransaction/multiHopSuspected on affected swaps).
+   */
+  attributionMode?: "EXACT_LOG_DECODE" | "TX_GROSS_TOKEN_BALANCE_DIFF";
+
+  /** Self-contained decimals so a raw amount string is interpretable without the pool config. */
+  token0Decimals?: number;
+  token1Decimals?: number;
+
+  /** Per-swap caveats, rolled up into the containing candle's qualityFlags. */
+  qualityFlags?: DexPoolCandleQualityFlags;
+
   raw?: unknown;
 };
 
@@ -116,10 +136,27 @@ export type DexPoolCandleQualityFlags = {
   reorgAdjusted?: boolean;
   extremeWick?: boolean;
   lowTradeCount?: boolean;
+
+  /**
+   * Solana token-balance-diff attribution caveats (see
+   * solana-pool-swap-reader.ts). Never set on EVM log-decoded swaps.
+   */
+  /** Another recognized AMM program was invoked in the same transaction. */
+  multiAmmTransaction?: boolean;
+  /** A non-infrastructure program beyond this pool's own ran in the same transaction — a hop-like signal, recognized or not. */
+  multiHopSuspected?: boolean;
+  /** The gross positive/negative token deltas for a mint didn't balance — a transient (create+close) account or an unrelated transfer of the same mint is likely present. */
+  sameMintExtraTransfers?: boolean;
+  /** One of the pool's mints is native/wrapped SOL, where ATA rent create/close noise can distort the balance diff. */
+  nativeSolRentAmbiguity?: boolean;
+  /** The technique never verifies which accounts are the pool's own vaults — always true for TX_GROSS_TOKEN_BALANCE_DIFF swaps. */
+  poolVaultsNotVerified?: boolean;
+  /** No reliable in-slot transaction index was available; ordering falls back to a deterministic-but-not-necessarily-chronological signature tiebreaker. */
+  orderingApproximate?: boolean;
 };
 
 export type DexPoolCandleSource = {
-  mode: "ONCHAIN_POOL_EVENTS";
+  mode: "ONCHAIN_POOL_EVENTS" | "ONCHAIN_TX_TOKEN_BALANCE_DIFF";
   fromOrderingKey?: string;
   toOrderingKey?: string;
   txRefRange?: string[];
@@ -134,6 +171,8 @@ export type DexPoolSwapRawAudit = {
   orderingKey: string;
   amount0Raw?: string;
   amount1Raw?: string;
+  token0Decimals?: number;
+  token1Decimals?: number;
   sqrtPriceX96Raw?: string;
 };
 
@@ -170,9 +209,34 @@ export type DexPoolQualitySummary = {
   incompleteBlockRanges: number;
 };
 
+export type SolanaBackfillStopReason =
+  | "REACHED_FROM_SLOT"
+  | "MAX_SIGNATURES_COLLECTED"
+  | "MAX_SCANNED_PAGES"
+  | "RPC_LIMIT"
+  | "EMPTY_PAGE";
+
+/**
+ * Honesty about how much of the requested range was actually scanned.
+ *
+ * getSignaturesForAddress pages newest-first with before/until signature
+ * cursors, not a slot-range RPC filter — for a high-volume address and an
+ * old requested range, the scan can exhaust its page/signature budget
+ * before ever reaching fromSlot. rangeComplete=false means the dataset is
+ * NOT a guaranteed-full backfill of the requested range.
+ */
+export type BackfillCompleteness = {
+  requestedFromSlot: string;
+  requestedToSlot: string;
+  scannedSignatureCount: number;
+  collectedSignatureCount: number;
+  rangeComplete: boolean;
+  stopReason: SolanaBackfillStopReason;
+};
+
 export type DexPoolDatasetManifest = {
   datasetType: "DEX_POOL";
-  sourceMode: "ONCHAIN_POOL_EVENTS";
+  sourceMode: "ONCHAIN_POOL_EVENTS" | "ONCHAIN_TX_TOKEN_BALANCE_DIFF";
   datasetId: string;
 
   chain: DexChain;
@@ -214,8 +278,25 @@ export type DexPoolDatasetManifest = {
     closedCandlesOnly: true;
     availableFromCloseTime: true;
     lookaheadSafe: true;
-    intrablockOrderingPreserved: true;
+
+    /**
+     * False whenever any swap in this dataset fell back to an
+     * approximate (non-chronological-within-slot) ordering tiebreaker —
+     * see DexPoolCandleQualityFlags.orderingApproximate. Always true for
+     * EVM (block/txIndex/logIndex ordering is exact).
+     */
+    intrablockOrderingPreserved: boolean;
+
+    /**
+     * False for TX_GROSS_TOKEN_BALANCE_DIFF-attributed pools (current
+     * Solana adapters) — volumes can include other legs of a multi-hop
+     * route or unrelated same-mint transfers. True for EVM.
+     */
+    poolVolumeExact: boolean;
   };
+
+  /** Populated for Solana pools; omitted for EVM, whose eth_getLogs range read is exhaustive by construction. */
+  backfillCompleteness?: BackfillCompleteness;
 
   quality: DexPoolQualitySummary;
   generatedAt: string;

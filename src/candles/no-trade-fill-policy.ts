@@ -80,7 +80,7 @@ function buildFillForwardCandle(
 
 function buildFillSource(previous: DexPoolCandle): DexPoolCandle["source"] {
   return {
-    mode: "ONCHAIN_POOL_EVENTS",
+    mode: previous.source.mode,
     ...(previous.source.toOrderingKey !== undefined
       ? {
           fromOrderingKey: previous.source.toOrderingKey,

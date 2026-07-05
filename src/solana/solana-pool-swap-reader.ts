@@ -1,4 +1,6 @@
 import type {
+  BackfillCompleteness,
+  DexPoolCandleQualityFlags,
   DexPoolConfig,
   DexPoolQualitySummary,
   NormalizedPoolSwap,
@@ -9,10 +11,12 @@ import {
   type SolanaRpcFetch,
   type SolanaTransactionResult,
 } from "./solana-json-rpc-client.js";
+import { findSolanaAmmProgram } from "./solana-amm-program-registry.js";
+import { NATIVE_SOL_MINT, SOLANA_INFRA_PROGRAM_IDS } from "./solana-infra-programs.js";
 import { buildSolanaOrderingKey } from "./solana-ordering-key.js";
 import { collectSignaturesInSlotRange } from "./solana-signature-pagination.js";
 import {
-  computeMintGrossDeltaRaw,
+  computeMintGrossDelta,
   formatRawAmount,
 } from "./solana-token-balance-diff.js";
 
@@ -31,12 +35,23 @@ export type ReadSolanaAmmPoolSwapsWithQualityOptions = {
   failFast?: boolean;
   pageLimit?: number;
   maxSignatures?: number;
+  maxScannedPages?: number;
   onProgress?: DexBuildProgressHandler;
 };
 
 export type ReadSolanaAmmPoolSwapsWithQualityResult = {
   swaps: NormalizedPoolSwap[];
   quality: DexPoolQualitySummary;
+  backfillCompleteness: BackfillCompleteness;
+
+  /**
+   * True if intrablock ordering is guaranteed for every returned swap
+   * (a real in-slot transactionIndex was available). False means at
+   * least one swap fell back to a deterministic-but-not-necessarily-
+   * chronological signature tiebreaker — see
+   * DexPoolCandleQualityFlags.orderingApproximate.
+   */
+  intrablockOrderingPreserved: boolean;
 };
 
 export async function readSolanaAmmPoolSwapsWithQuality(
@@ -58,6 +73,9 @@ export async function readSolanaAmmPoolSwapsWithQuality(
   const fromSlot = options.fromBlock;
   const toSlot = options.toBlock;
   const programId = options.pool.programId;
+  const involvesNativeSol =
+    options.pool.token0.address === NATIVE_SOL_MINT ||
+    options.pool.token1.address === NATIVE_SOL_MINT;
 
   const client = createSolanaJsonRpcClient({
     rpcUrl: options.rpcUrl,
@@ -83,23 +101,25 @@ export async function readSolanaAmmPoolSwapsWithQuality(
     toBlock: toSlot.toString(),
   });
 
-  const { signatures, incompleteRangeCount } = await collectSignaturesInSlotRange({
+  const paginationResult = await collectSignaturesInSlotRange({
     client,
     address: options.pool.poolAddress,
     fromSlot,
     toSlot,
     pageLimit,
     maxSignatures,
+    maxScannedPages: options.maxScannedPages,
     failFast,
   });
-  quality.incompleteBlockRanges += incompleteRangeCount;
-  if (incompleteRangeCount > 0) quality.passed = false;
+  quality.incompleteBlockRanges += paginationResult.incompleteRangeCount;
+  if (paginationResult.incompleteRangeCount > 0) quality.passed = false;
 
   const swaps: NormalizedPoolSwap[] = [];
   const seenSignatures = new Set<string>();
   let processed = 0;
+  let intrablockOrderingPreserved = true;
 
-  for (const sigInfo of signatures) {
+  for (const sigInfo of paginationResult.signatures) {
     processed += 1;
 
     if (seenSignatures.has(sigInfo.signature)) {
@@ -156,24 +176,18 @@ export async function readSolanaAmmPoolSwapsWithQuality(
       continue;
     }
 
-    const amount0Raw = computeMintGrossDeltaRaw(
-      tx.meta,
-      options.pool.token0.address,
-    );
-    const amount1Raw = computeMintGrossDeltaRaw(
-      tx.meta,
-      options.pool.token1.address,
-    );
+    const delta0 = computeMintGrossDelta(tx.meta, options.pool.token0.address);
+    const delta1 = computeMintGrossDelta(tx.meta, options.pool.token1.address);
 
-    if (amount0Raw === 0n || amount1Raw === 0n) {
+    if (delta0.grossRaw === 0n || delta1.grossRaw === 0n) {
       // Program was invoked but neither mint moved (e.g. initialize,
       // set-config, or a route leg that touched this pool account
       // read-only) — not a swap of this pool.
       continue;
     }
 
-    const amount0 = formatRawAmount(amount0Raw, options.pool.token0.decimals);
-    const amount1 = formatRawAmount(amount1Raw, options.pool.token1.decimals);
+    const amount0 = formatRawAmount(delta0.grossRaw, options.pool.token0.decimals);
+    const amount1 = formatRawAmount(delta1.grossRaw, options.pool.token1.decimals);
     const priceToken1PerToken0 = amount1 / amount0;
 
     if (!Number.isFinite(priceToken1PerToken0) || priceToken1PerToken0 <= 0) {
@@ -185,13 +199,25 @@ export async function readSolanaAmmPoolSwapsWithQuality(
       continue;
     }
 
+    const transactionIndex = tx.transactionIndex ?? sigInfo.transactionIndex;
+    const orderingApproximate = transactionIndex === undefined;
+    if (orderingApproximate) intrablockOrderingPreserved = false;
+
+    const swapQualityFlags = buildSwapQualityFlags({
+      tx,
+      programId,
+      balanced: delta0.balanced && delta1.balanced,
+      involvesNativeSol,
+      orderingApproximate,
+    });
+
     swaps.push({
       chain: options.pool.chain,
       dex: options.pool.dex,
       poolAddress: options.pool.poolAddress,
       orderingKey: buildSolanaOrderingKey({
         slot: sigInfo.slot,
-        transactionIndex: tx.transactionIndex ?? sigInfo.transactionIndex,
+        transactionIndex,
         signature: sigInfo.signature,
       }),
       txRef: sigInfo.signature,
@@ -200,10 +226,14 @@ export async function readSolanaAmmPoolSwapsWithQuality(
       token1Symbol: options.pool.token1.symbol,
       amount0,
       amount1,
-      amount0Raw: amount0Raw.toString(),
-      amount1Raw: amount1Raw.toString(),
+      amount0Raw: delta0.grossRaw.toString(),
+      amount1Raw: delta1.grossRaw.toString(),
+      token0Decimals: options.pool.token0.decimals,
+      token1Decimals: options.pool.token1.decimals,
       priceToken1PerToken0,
       priceToken0PerToken1: 1 / priceToken1PerToken0,
+      attributionMode: "TX_GROSS_TOKEN_BALANCE_DIFF",
+      qualityFlags: swapQualityFlags,
       raw: tx,
     });
 
@@ -228,7 +258,64 @@ export async function readSolanaAmmPoolSwapsWithQuality(
     swaps: swaps.length,
   });
 
-  return { swaps, quality };
+  return {
+    swaps,
+    quality,
+    intrablockOrderingPreserved,
+    backfillCompleteness: {
+      requestedFromSlot: fromSlot.toString(),
+      requestedToSlot: toSlot.toString(),
+      scannedSignatureCount: paginationResult.scannedSignatureCount,
+      collectedSignatureCount: paginationResult.signatures.length,
+      rangeComplete: paginationResult.rangeComplete,
+      stopReason: paginationResult.stopReason,
+    },
+  };
+}
+
+function buildSwapQualityFlags(input: {
+  tx: SolanaTransactionResult;
+  programId: string;
+  balanced: boolean;
+  involvesNativeSol: boolean;
+  orderingApproximate: boolean;
+}): DexPoolCandleQualityFlags {
+  const otherProgramIds = collectOtherInvokedPrograms(input.tx, input.programId);
+  const otherRecognizedAmm = [...otherProgramIds].some(
+    (id) => findSolanaAmmProgram(id) !== undefined,
+  );
+  const otherNonInfra = [...otherProgramIds].some(
+    (id) => !SOLANA_INFRA_PROGRAM_IDS.has(id),
+  );
+
+  return {
+    poolVaultsNotVerified: true,
+    ...(otherRecognizedAmm ? { multiAmmTransaction: true } : {}),
+    ...(otherNonInfra ? { multiHopSuspected: true } : {}),
+    ...(!input.balanced ? { sameMintExtraTransfers: true } : {}),
+    ...(input.involvesNativeSol && !input.balanced
+      ? { nativeSolRentAmbiguity: true }
+      : {}),
+    ...(input.orderingApproximate ? { orderingApproximate: true } : {}),
+  };
+}
+
+function collectOtherInvokedPrograms(
+  tx: SolanaTransactionResult,
+  ownProgramId: string,
+): Set<string> {
+  const ids = new Set<string>();
+
+  for (const instruction of tx.transaction.message.instructions) {
+    if (instruction.programId !== ownProgramId) ids.add(instruction.programId);
+  }
+  for (const group of tx.meta?.innerInstructions ?? []) {
+    for (const instruction of group.instructions) {
+      if (instruction.programId !== ownProgramId) ids.add(instruction.programId);
+    }
+  }
+
+  return ids;
 }
 
 /**
@@ -244,7 +331,8 @@ export async function readSolanaAmmPoolSwapsWithQuality(
  * amounts (see solana-token-balance-diff.ts) reflect the whole route's
  * net movement of the pool's two mints, not this leg's amount alone —
  * there is no per-instruction balance snapshot to isolate it further
- * without protocol-specific instruction decoding.
+ * without protocol-specific instruction decoding. Flagged via
+ * qualityFlags.multiAmmTransaction/multiHopSuspected when detected.
  */
 function transactionInvokesPool(
   tx: SolanaTransactionResult,

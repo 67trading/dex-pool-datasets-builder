@@ -27,7 +27,7 @@ export async function buildJupiterExecutionDataset(
   const startedAt = new Date().toISOString();
   const storage = resolveDatasetStorage(options.outputUri);
 
-  const { executions, quality } = await readJupiterExecutionsWithQuality({
+  const { executions, quality, backfillCompleteness } = await readJupiterExecutionsWithQuality({
     rpcUrl: options.rpcUrl,
     fromBlock: options.fromSlot,
     toBlock: options.toSlot,
@@ -71,12 +71,15 @@ export async function buildJupiterExecutionDataset(
     },
     recordCount: executions.length,
     quality,
+    backfillCompleteness,
     generatedAt,
     notes:
       "Historical executed Jupiter swaps, not a pool candle dataset. " +
       "input/output mint + amount are derived from the signing wallet's own " +
       "token-balance deltas (plus native SOL lamport delta), not from " +
-      "protocol-level instruction decoding — see jupiter-execution-reader.ts.",
+      "protocol-level instruction decoding — see jupiter-execution-reader.ts. " +
+      "Not guaranteed complete for the requested range unless " +
+      "backfillCompleteness.rangeComplete is true.",
   };
 
   await storage.writeObject({
