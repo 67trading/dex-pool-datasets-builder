@@ -1,4 +1,5 @@
 import type { DexPoolConfig } from "../types/dex-pool-dataset.types.js";
+import { isSolanaAddress } from "../solana/solana-address.js";
 
 const EVM_ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/;
 
@@ -51,21 +52,31 @@ export function validatePoolRegistry(
     if (
       pool.kind !== undefined &&
       pool.kind !== "UNISWAP_V3_STYLE" &&
-      pool.kind !== "UNISWAP_V2_STYLE"
+      pool.kind !== "UNISWAP_V2_STYLE" &&
+      pool.kind !== "SOLANA_AMM_STYLE"
     ) {
       entryErrors.push(`POOL_KIND_UNSUPPORTED:${context}:${String(pool.kind)}`);
     }
     if (pool.kind === "UNISWAP_V2_STYLE") {
       entryErrors.push(`POOL_KIND_NOT_MVP:${context}:UNISWAP_V2_STYLE`);
     }
+    if (
+      pool.kind === "SOLANA_AMM_STYLE" &&
+      (typeof pool.programId !== "string" || pool.programId.length === 0)
+    ) {
+      entryErrors.push(`POOL_PROGRAM_ID_MISSING:${context}`);
+    }
+
+    const addressChain = pool.chain === "solana" ? "solana" : "evm";
 
     validateAddress(
       pool.poolAddress,
+      addressChain,
       `POOL_ADDRESS_INVALID:${context}:poolAddress`,
       entryErrors,
     );
-    validateToken(pool.token0, `${context}:token0`, entryErrors);
-    validateToken(pool.token1, `${context}:token1`, entryErrors);
+    validateToken(pool.token0, addressChain, `${context}:token0`, entryErrors);
+    validateToken(pool.token1, addressChain, `${context}:token1`, entryErrors);
 
     if (pool.baseToken !== "token0" && pool.baseToken !== "token1") {
       entryErrors.push(`POOL_BASE_TOKEN_INVALID:${context}`);
@@ -102,8 +113,11 @@ export function buildReplaySymbol(pool: DexPoolConfig): string {
   return `${base}${quote}`;
 }
 
+type RegistryAddressChain = "evm" | "solana";
+
 function validateToken(
   token: unknown,
+  addressChain: RegistryAddressChain,
   context: string,
   errors: string[],
 ): void {
@@ -116,6 +130,7 @@ function validateToken(
   }
   validateAddress(
     token.address,
+    addressChain,
     `POOL_TOKEN_ADDRESS_INVALID:${context}`,
     errors,
   );
@@ -131,10 +146,19 @@ function validateToken(
 
 function validateAddress(
   value: unknown,
+  addressChain: RegistryAddressChain,
   errorCode: string,
   errors: string[],
 ): void {
-  if (typeof value !== "string" || !EVM_ADDRESS_PATTERN.test(value)) {
+  if (typeof value !== "string") {
+    errors.push(errorCode);
+    return;
+  }
+  const valid =
+    addressChain === "solana"
+      ? isSolanaAddress(value)
+      : EVM_ADDRESS_PATTERN.test(value);
+  if (!valid) {
     errors.push(errorCode);
   }
 }

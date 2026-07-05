@@ -131,7 +131,7 @@ export async function exportDexWalkForwardDatasetToStorage(
     checksum,
     sourceDetails: {
       provider: "dex_pool",
-      endpoint: "eth_getLogs",
+      endpoint: truthManifest.source.eventSource,
       timezone: "UTC",
     },
     sourceDataset: {

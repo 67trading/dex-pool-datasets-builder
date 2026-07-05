@@ -4,6 +4,7 @@ import type {
 } from "../types/dex-pool-dataset.types.js";
 import type { EvmLog, HexString } from "./evm-json-rpc-client.js";
 import { hexToBigInt, hexToNumber } from "./evm-json-rpc-client.js";
+import { buildEvmOrderingKey } from "./evm-ordering-key.js";
 
 export const UNISWAP_V3_SWAP_TOPIC =
   "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67" as const;
@@ -69,11 +70,12 @@ export function decodeUniswapV3SwapLog(input: {
     chain: input.pool.chain,
     dex: input.pool.dex,
     poolAddress: input.pool.poolAddress,
-    blockNumber: hexToBigInt(input.log.blockNumber),
-    blockHash: input.log.blockHash,
-    transactionHash: input.log.transactionHash,
-    transactionIndex: hexToNumber(input.log.transactionIndex),
-    logIndex: hexToNumber(input.log.logIndex),
+    orderingKey: buildEvmOrderingKey({
+      blockNumber: hexToBigInt(input.log.blockNumber),
+      transactionIndex: hexToNumber(input.log.transactionIndex),
+      logIndex: hexToNumber(input.log.logIndex),
+    }),
+    txRef: input.log.transactionHash,
     blockTimestamp: input.blockTimestamp,
     token0Symbol: input.pool.token0.symbol,
     token1Symbol: input.pool.token1.symbol,

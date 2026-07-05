@@ -153,12 +153,14 @@ export async function resolvePoolSelection(input: {
     });
 
     const factoryAddress = getUniswapV3FactoryAddress(input.chain);
+    const token0Address = assertEvmAddress(baseToken.address, "token0");
+    const token1Address = assertEvmAddress(quoteToken.address, "token1");
 
     const poolAddress = await getPoolFromFactory({
       client: input.client,
       chain: input.chain,
-      token0: baseToken.address,
-      token1: quoteToken.address,
+      token0: token0Address,
+      token1: token1Address,
       fee,
     });
 
@@ -173,8 +175,8 @@ export async function resolvePoolSelection(input: {
       pair: normalizedPair,
       fee,
       presetFee: preset?.fee,
-      token0: baseToken.address,
-      token1: quoteToken.address,
+      token0: token0Address,
+      token1: token1Address,
       factoryAddress,
       base: baseSymbol,
       quote: quoteSymbol,
@@ -187,8 +189,8 @@ export async function resolvePoolSelection(input: {
             ? preset.fee
             : undefined,
         factoryAddress,
-        token0: baseToken.address,
-        token1: quoteToken.address,
+        token0: token0Address,
+        token1: token1Address,
         resolvedPoolAddress: poolAddress,
       },
     };

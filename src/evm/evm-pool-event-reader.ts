@@ -12,6 +12,7 @@ import {
   hexToNumber,
   type EvmLog,
   type EvmRpcFetch,
+  type HexString,
 } from "./evm-json-rpc-client.js";
 import {
   decodeUniswapV3SwapLog,
@@ -109,7 +110,7 @@ export async function readUniswapV3PoolSwapsWithQuality(
 
     try {
       logs = await client.getLogs({
-        address: options.pool.poolAddress,
+        address: options.pool.poolAddress as HexString,
         fromBlock: range.fromBlock,
         toBlock: range.toBlock,
         topics: [UNISWAP_V3_SWAP_TOPIC],
@@ -251,15 +252,9 @@ export async function readUniswapV3PoolSwapsWithQuality(
   }
 
   swaps.sort((a, b) => {
-    if (a.blockNumber !== b.blockNumber) {
-      return a.blockNumber < b.blockNumber ? -1 : 1;
-    }
-
-    if (a.transactionIndex !== b.transactionIndex) {
-      return a.transactionIndex - b.transactionIndex;
-    }
-
-    return a.logIndex - b.logIndex;
+    if (a.orderingKey < b.orderingKey) return -1;
+    if (a.orderingKey > b.orderingKey) return 1;
+    return 0;
   });
 
   const stats = timestampCache.stats;

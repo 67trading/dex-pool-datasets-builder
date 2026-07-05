@@ -84,19 +84,19 @@ function buildAggregatedSource(
   first: DexPoolCandle,
   last: DexPoolCandle,
 ): DexPoolCandle["source"] {
-  const blockHashRange = [
-    first.source.blockHashRange?.[0] ?? "",
-    last.source.blockHashRange?.at(-1) ?? "",
+  const txRefRange = [
+    first.source.txRefRange?.[0] ?? "",
+    last.source.txRefRange?.at(-1) ?? "",
   ].filter((value) => value.length > 0);
 
   return {
     mode: "ONCHAIN_POOL_EVENTS",
-    ...(first.source.fromBlock !== undefined
-      ? { fromBlock: first.source.fromBlock }
+    ...(first.source.fromOrderingKey !== undefined
+      ? { fromOrderingKey: first.source.fromOrderingKey }
       : {}),
-    ...(last.source.toBlock !== undefined
-      ? { toBlock: last.source.toBlock }
+    ...(last.source.toOrderingKey !== undefined
+      ? { toOrderingKey: last.source.toOrderingKey }
       : {}),
-    ...(blockHashRange.length > 0 ? { blockHashRange } : {}),
+    ...(txRefRange.length > 0 ? { txRefRange } : {}),
   };
 }

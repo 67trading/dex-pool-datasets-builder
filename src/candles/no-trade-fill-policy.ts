@@ -81,11 +81,14 @@ function buildFillForwardCandle(
 function buildFillSource(previous: DexPoolCandle): DexPoolCandle["source"] {
   return {
     mode: "ONCHAIN_POOL_EVENTS",
-    ...(previous.source.toBlock !== undefined
-      ? { fromBlock: previous.source.toBlock, toBlock: previous.source.toBlock }
+    ...(previous.source.toOrderingKey !== undefined
+      ? {
+          fromOrderingKey: previous.source.toOrderingKey,
+          toOrderingKey: previous.source.toOrderingKey,
+        }
       : {}),
-    ...(previous.source.blockHashRange !== undefined
-      ? { blockHashRange: previous.source.blockHashRange }
+    ...(previous.source.txRefRange !== undefined
+      ? { txRefRange: previous.source.txRefRange }
       : {}),
   };
 }

@@ -19,7 +19,7 @@ export function buildCandlesFromSwaps(
 ): DexPoolCandle[] {
   const timeframeMs = getTimeframeMs(options.timeframe);
   const sorted = sortSwaps(options.swaps);
-  assertUniqueSwapLogs(sorted);
+  assertUniqueSwapEvents(sorted);
   const buckets = new Map<number, NormalizedPoolSwap[]>();
 
   for (const swap of sorted) {
@@ -38,15 +38,18 @@ export function buildCandlesFromSwaps(
     );
 }
 
+/**
+ * Sorts purely by the chain-agnostic orderingKey string.
+ *
+ * Adapters (EVM: block+txIndex+logIndex, Solana: slot+txIndex+ixRef) are
+ * responsible for constructing orderingKey such that lexicographic string
+ * comparison equals chronological event order.
+ */
 export function sortSwaps(swaps: NormalizedPoolSwap[]): NormalizedPoolSwap[] {
   return [...swaps].sort((a, b) => {
-    if (a.blockNumber !== b.blockNumber) {
-      return a.blockNumber < b.blockNumber ? -1 : 1;
-    }
-    if (a.transactionIndex !== b.transactionIndex) {
-      return a.transactionIndex - b.transactionIndex;
-    }
-    return a.logIndex - b.logIndex;
+    if (a.orderingKey < b.orderingKey) return -1;
+    if (a.orderingKey > b.orderingKey) return 1;
+    return 0;
   });
 }
 
@@ -98,9 +101,9 @@ function buildCandleFromBucket(
     tradeCount: bucket.length,
     source: {
       mode: "ONCHAIN_POOL_EVENTS",
-      fromBlock: first.blockNumber.toString(),
-      toBlock: last.blockNumber.toString(),
-      blockHashRange: [first.blockHash, last.blockHash],
+      fromOrderingKey: first.orderingKey,
+      toOrderingKey: last.orderingKey,
+      txRefRange: [first.txRef, last.txRef],
       rawSwapRange: {
         first: buildRawSwapAudit(first),
         last: buildRawSwapAudit(last),
@@ -110,14 +113,13 @@ function buildCandleFromBucket(
   };
 }
 
-function assertUniqueSwapLogs(swaps: NormalizedPoolSwap[]): void {
+function assertUniqueSwapEvents(swaps: NormalizedPoolSwap[]): void {
   const seen = new Set<string>();
   for (const swap of swaps) {
-    const key = `${swap.blockNumber.toString()}:${swap.transactionIndex}:${swap.logIndex}`;
-    if (seen.has(key)) {
-      throw new Error(`DUPLICATE_SWAP_LOG:${key}`);
+    if (seen.has(swap.orderingKey)) {
+      throw new Error(`DUPLICATE_SWAP_EVENT:${swap.orderingKey}`);
     }
-    seen.add(key);
+    seen.add(swap.orderingKey);
   }
 }
 
@@ -130,9 +132,7 @@ export function priceForPoolDirection(
       ? swap.priceToken1PerToken0
       : swap.priceToken0PerToken1;
   if (!Number.isFinite(price) || price <= 0) {
-    throw new Error(
-      `INVALID_DERIVED_PRICE:${swap.transactionHash}:${swap.logIndex}`,
-    );
+    throw new Error(`INVALID_DERIVED_PRICE:${swap.txRef}:${swap.orderingKey}`);
   }
   return price;
 }
@@ -147,21 +147,14 @@ function amountForToken(
 function validateSwap(swap: NormalizedPoolSwap): void {
   if (!Number.isFinite(swap.blockTimestamp) || swap.blockTimestamp <= 0) {
     throw new Error(
-      `MISSING_BLOCK_TIMESTAMP:${swap.transactionHash}:${swap.logIndex}`,
+      `MISSING_BLOCK_TIMESTAMP:${swap.txRef}:${swap.orderingKey}`,
     );
   }
-  if (
-    !Number.isFinite(swap.transactionIndex) ||
-    !Number.isFinite(swap.logIndex)
-  ) {
-    throw new Error(
-      `INVALID_LOG_ORDER_FIELDS:${swap.transactionHash}:${swap.logIndex}`,
-    );
+  if (swap.orderingKey.length === 0) {
+    throw new Error(`INVALID_ORDERING_KEY:${swap.txRef}`);
   }
   if (!Number.isFinite(swap.amount0) || !Number.isFinite(swap.amount1)) {
-    throw new Error(
-      `INVALID_SWAP_AMOUNT:${swap.transactionHash}:${swap.logIndex}`,
-    );
+    throw new Error(`INVALID_SWAP_AMOUNT:${swap.txRef}:${swap.orderingKey}`);
   }
   if (
     !Number.isFinite(swap.priceToken1PerToken0) ||
@@ -170,15 +163,15 @@ function validateSwap(swap: NormalizedPoolSwap): void {
     swap.priceToken0PerToken1 <= 0
   ) {
     throw new Error(
-      `INVALID_DERIVED_PRICE:${swap.transactionHash}:${swap.logIndex}`,
+      `INVALID_DERIVED_PRICE:${swap.txRef}:${swap.orderingKey}`,
     );
   }
 }
 
 function buildRawSwapAudit(swap: NormalizedPoolSwap): DexPoolSwapRawAudit {
   return {
-    transactionHash: swap.transactionHash,
-    logIndex: swap.logIndex,
+    txRef: swap.txRef,
+    orderingKey: swap.orderingKey,
     ...(swap.amount0Raw !== undefined ? { amount0Raw: swap.amount0Raw } : {}),
     ...(swap.amount1Raw !== undefined ? { amount1Raw: swap.amount1Raw } : {}),
     ...(swap.sqrtPriceX96Raw !== undefined
