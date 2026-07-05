@@ -1,6 +1,9 @@
 import { readFile } from "node:fs/promises";
 import type { Command } from "commander";
 import type { ResolvedDexBuildConfig } from "../../config/dex-build-config.types.js";
+import { loadDexBuildConfig } from "../../config/load-dex-build-config.js";
+import { resolveDexBuildConfig } from "../../config/resolve-dex-build-config.js";
+import { validatePoolRegistry } from "../../registry/pool-registry.js";
 import {
   parsePairsList,
   parsePoolsList,
@@ -26,6 +29,7 @@ import { printLine, printError, printJson } from "../cli-output.js";
 
 export type BuildCommandOptions = {
   config?: string;
+  registryConfig?: string;
   pool?: string;
   pools?: string;
   pair?: string;
@@ -178,9 +182,11 @@ export async function runBuildCommand(options: BuildCommandOptions): Promise<voi
   let resolved: ResolvedDexBuildConfig;
 
   try {
-    resolved = options.config !== undefined
-      ? await resolveBuildConfigFromFile(options)
-      : await resolveSimpleBuildConfigFromCli(options);
+    resolved = options.registryConfig !== undefined
+      ? await resolveRegistryBuildConfigFromFile(options)
+      : options.config !== undefined
+        ? await resolveBuildConfigFromFile(options)
+        : await resolveSimpleBuildConfigFromCli(options);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     if (json === true) {
@@ -233,6 +239,47 @@ async function resolveBuildConfigFromFile(options: BuildCommandOptions): Promise
 
   const rawConfig = await loadSimpleBuildConfig(options.config);
   return resolveSimpleDexBuildConfig(simpleInputFromConfig(rawConfig, options));
+}
+
+/**
+ * Registry-based config path: network/registry/build JSON (see
+ * config/dex-dataset.*.example.json) + a separate pool-registry JSON file.
+ *
+ * This is the only build path for chains without a "simple mode" resolver
+ * (e.g. Solana — there is no factory/getPool equivalent to resolve a pair
+ * selector on-chain), so pools are declared explicitly in the registry.
+ */
+async function resolveRegistryBuildConfigFromFile(options: BuildCommandOptions): Promise<ResolvedDexBuildConfig> {
+  if (options.registryConfig === undefined) {
+    throw new Error("REGISTRY_CONFIG_PATH_REQUIRED");
+  }
+
+  const rawConfig = await loadDexBuildConfig(options.registryConfig);
+  const resolved = resolveDexBuildConfig({
+    config: rawConfig,
+    outputOverride: options.output ?? options.out,
+  });
+
+  const registryRaw = await readFile(rawConfig.registry.path, "utf8").catch((error: unknown) => {
+    throw new Error(`REGISTRY_NOT_FOUND:${rawConfig.registry.path}`, { cause: error });
+  });
+
+  let registryParsed: unknown;
+  try {
+    registryParsed = JSON.parse(registryRaw);
+  } catch (error) {
+    throw new Error(`REGISTRY_PARSE_ERROR:${rawConfig.registry.path}`, { cause: error });
+  }
+
+  const { pools, errors } = validatePoolRegistry(registryParsed);
+  if (errors.length > 0) {
+    throw new Error(`POOL_REGISTRY_INVALID: ${errors.join(", ")}`);
+  }
+
+  return {
+    ...resolved,
+    registryPools: pools,
+  };
 }
 
 async function resolveSimpleBuildConfigFromCli(options: BuildCommandOptions): Promise<ResolvedDexBuildConfig> {
@@ -490,6 +537,10 @@ export function registerBuildCommand(program: Command): void {
     .command("build [selector]")
     .description("Build a DEX pool dataset. Example: dex-pool build base:WETH/USDC --fee 500 --days 30")
     .option("-c, --config <config>", "Path to dex-pool.config.json")
+    .option(
+      "--registry-config <registryConfig>",
+      "Path to a registry-based dex-dataset config (network+registry+build JSON); required for chains without simple-mode support, e.g. solana",
+    )
     .option("--pool <pool>", "Pool contract address")
     .option("--pools <pools>", "Comma-separated pool contract addresses")
     .option("--pair <pair>", "Pair selector, e.g. WETH/USDC")

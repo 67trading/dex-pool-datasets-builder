@@ -6,6 +6,7 @@ import { buildCandlesFromSwaps } from "../candles/pool-candle-builder.js";
 import { fillNoTradeIntervals } from "../candles/no-trade-fill-policy.js";
 import { aggregateDexPoolCandles } from "../candles/timeframe-aggregator.js";
 import { readUniswapV3PoolSwapsWithQuality } from "../evm/evm-pool-event-reader.js";
+import { readSolanaAmmPoolSwapsWithQuality } from "../solana/solana-pool-swap-reader.js";
 import { exportDexWalkForwardDatasetToStorage } from "../export/walk-forward-storage-export-adapter.js";
 import {
   validatePoolRegistry,
@@ -101,16 +102,26 @@ export async function buildDexPoolDataset(
           ? join(options.cacheDir, pool.chain, "block-timestamps.jsonl")
           : undefined;
 
-      const { swaps, quality } = await readUniswapV3PoolSwapsWithQuality({
-        pool,
-        rpcUrl: options.network.rpcUrl,
-        fromBlock: options.build.fromBlock,
-        toBlock: options.build.toBlock,
-        chunkSize: options.build.chunkSize,
-        failFast: options.build.failFast,
-        timestampCachePath,
-        onProgress: hooks.onProgress,
-      });
+      const { swaps, quality } =
+        pool.kind === "SOLANA_AMM_STYLE"
+          ? await readSolanaAmmPoolSwapsWithQuality({
+              pool,
+              rpcUrl: options.network.rpcUrl,
+              fromBlock: options.build.fromBlock,
+              toBlock: options.build.toBlock,
+              failFast: options.build.failFast,
+              onProgress: hooks.onProgress,
+            })
+          : await readUniswapV3PoolSwapsWithQuality({
+              pool,
+              rpcUrl: options.network.rpcUrl,
+              fromBlock: options.build.fromBlock,
+              toBlock: options.build.toBlock,
+              chunkSize: options.build.chunkSize,
+              failFast: options.build.failFast,
+              timestampCachePath,
+              onProgress: hooks.onProgress,
+            });
 
       if (swaps.length === 0) {
         const message = `NO_SWAPS_IN_RANGE:${pool.id}:${options.build.fromBlock.toString()}:${options.build.toBlock.toString()}`;
@@ -254,11 +265,18 @@ export async function buildDexPoolDataset(
           to: new Date(globalLastCloseTime).toISOString(),
         },
 
-        source: {
-          rpcProvider: "configured_archive_rpc",
-          eventSource: "eth_getLogs",
-          events: ["Swap"],
-        },
+        source:
+          pool.kind === "SOLANA_AMM_STYLE"
+            ? {
+                rpcProvider: "configured_archive_rpc",
+                eventSource: "solana_transaction_token_balance_diff",
+                events: ["Swap"],
+              }
+            : {
+                rpcProvider: "configured_archive_rpc",
+                eventSource: "eth_getLogs",
+                events: ["Swap"],
+              },
 
         timeframes: options.build.timeframes,
 

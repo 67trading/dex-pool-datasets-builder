@@ -1,0 +1,27 @@
+{
+  "datasetId": "solana-raydium-ray-usdc-v1",
+  "registry": {
+    "path": "config/dex-pools.solana.example.json"
+  },
+  "network": {
+    "chain": "solana",
+    "chainId": 0,
+    "rpcUrlEnv": "SOLANA_RPC_URL",
+    "finality": {
+      "mode": "confirmation_lag",
+      "confirmations": 32
+    }
+  },
+  "build": {
+    "pools": ["solana-raydium-ray-usdc"],
+    "fromBlock": "430000000",
+    "toBlock": "430100000",
+    "baseTimeframe": "1m",
+    "timeframes": ["1m", "5m", "15m", "1h"],
+    "failFast": false
+  },
+  "output": {
+    "type": "local",
+    "uri": "local://./data/dex-pool-datasets"
+  }
+}

@@ -1,0 +1,71 @@
+import { describe, expect, it } from "vitest";
+import {
+  computeMintGrossDeltaRaw,
+  formatRawAmount,
+} from "./solana-token-balance-diff.js";
+import type { SolanaTokenBalance } from "./solana-json-rpc-client.js";
+
+const MINT_A = "MintAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const MINT_B = "MintBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+
+function balance(accountIndex: number, mint: string, amount: string): SolanaTokenBalance {
+  return {
+    accountIndex,
+    mint,
+    uiTokenAmount: { amount, decimals: 6, uiAmount: null, uiAmountString: "" },
+  };
+}
+
+describe("computeMintGrossDeltaRaw", () => {
+  it("computes the closed gross transfer amount for a simple two-account swap", () => {
+    const meta = {
+      preTokenBalances: [balance(0, MINT_A, "1000"), balance(1, MINT_A, "0")],
+      postTokenBalances: [balance(0, MINT_A, "700"), balance(1, MINT_A, "300")],
+    };
+
+    expect(computeMintGrossDeltaRaw(meta, MINT_A)).toBe(300n);
+  });
+
+  it("returns 0 when a mint doesn't move", () => {
+    const meta = {
+      preTokenBalances: [balance(0, MINT_A, "1000")],
+      postTokenBalances: [balance(0, MINT_A, "1000")],
+    };
+
+    expect(computeMintGrossDeltaRaw(meta, MINT_A)).toBe(0n);
+  });
+
+  it("ignores unrelated mints", () => {
+    const meta = {
+      preTokenBalances: [balance(0, MINT_A, "1000"), balance(1, MINT_B, "500")],
+      postTokenBalances: [balance(0, MINT_A, "900"), balance(1, MINT_B, "600")],
+    };
+
+    expect(computeMintGrossDeltaRaw(meta, MINT_A)).toBe(100n);
+    expect(computeMintGrossDeltaRaw(meta, MINT_B)).toBe(100n);
+  });
+
+  it("takes the max of positive/negative sums when a transient account is invisible on one side", () => {
+    // Account 2 is created within the tx (absent from preTokenBalances) and
+    // closed by the end (absent from postTokenBalances) — a common
+    // wrap-SOL -> swap -> unwrap pattern. The positive side captures the
+    // full gross amount; the negative side would undercount without the max().
+    const meta = {
+      preTokenBalances: [balance(0, MINT_A, "1000")],
+      postTokenBalances: [balance(0, MINT_A, "1000"), balance(2, MINT_A, "500")],
+    };
+
+    expect(computeMintGrossDeltaRaw(meta, MINT_A)).toBe(500n);
+  });
+
+  it("handles missing balance arrays as empty", () => {
+    expect(computeMintGrossDeltaRaw({}, MINT_A)).toBe(0n);
+  });
+});
+
+describe("formatRawAmount", () => {
+  it("adjusts a raw integer amount by decimals", () => {
+    expect(formatRawAmount(169_938_000n, 6)).toBeCloseTo(169.938);
+    expect(formatRawAmount(120_754_344n, 6)).toBeCloseTo(120.754344);
+  });
+});
