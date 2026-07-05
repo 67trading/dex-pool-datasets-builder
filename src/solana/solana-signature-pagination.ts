@@ -61,7 +61,7 @@ export async function collectSignaturesInSlotRange(
   let stopReason: SolanaBackfillStopReason = "EMPTY_PAGE";
   let rangeComplete = false;
 
-  while (true) {
+  outer: while (true) {
     if (collected.length >= maxSignatures) {
       stopReason = "MAX_SIGNATURES_COLLECTED";
       break;
@@ -99,6 +99,14 @@ export async function collectSignaturesInSlotRange(
     let reachedStart = false;
 
     for (const item of page) {
+      // Enforce maxSignatures as a real hard cap even mid-page, rather
+      // than only checking it between pages (a single page can contain
+      // far more in-range signatures than the requested cap).
+      if (collected.length >= maxSignatures) {
+        stopReason = "MAX_SIGNATURES_COLLECTED";
+        break outer;
+      }
+
       const slotBig = BigInt(item.slot);
       if (slotBig > options.toSlot) continue;
       if (slotBig < options.fromSlot) {

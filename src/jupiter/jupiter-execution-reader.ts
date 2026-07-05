@@ -72,6 +72,13 @@ export async function readJupiterExecutionsWithQuality(
   });
   quality.incompleteRanges += paginationResult.incompleteRangeCount;
   if (paginationResult.incompleteRangeCount > 0) quality.passed = false;
+  if (!paginationResult.rangeComplete) {
+    // Not a guaranteed-full backfill of the requested slot range — see
+    // manifest.backfillCompleteness. A consumer checking quality.passed
+    // alone must not be able to mistake this for a complete dataset.
+    quality.incompleteRanges += 1;
+    quality.passed = false;
+  }
 
   const executions: JupiterExecutionRecord[] = [];
   const seenSignatures = new Set<string>();

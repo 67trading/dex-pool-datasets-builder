@@ -75,7 +75,10 @@ describe("collectSignaturesInSlotRange", () => {
     expect(result.stopReason).toBe("EMPTY_PAGE");
   });
 
-  it("stops with MAX_SIGNATURES_COLLECTED once the collected cap is hit", async () => {
+  it("enforces maxSignatures as a real hard cap even mid-page, not just between pages", async () => {
+    // A single page can contain far more in-range signatures than the
+    // requested cap — the cap must be checked while walking the page,
+    // not only once per page.
     const page = Array.from({ length: 10 }, (_, i) => sig(100 + i, `s${i}`));
     const client = fakeClient([page, page, page]);
 
@@ -88,6 +91,7 @@ describe("collectSignaturesInSlotRange", () => {
       maxSignatures: 5,
     });
 
+    expect(result.signatures).toHaveLength(5);
     expect(result.stopReason).toBe("MAX_SIGNATURES_COLLECTED");
     expect(result.rangeComplete).toBe(false);
   });
